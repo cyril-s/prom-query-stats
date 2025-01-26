@@ -11,9 +11,37 @@ import (
 	"time"
 )
 
+type timeFlag struct {
+	*time.Time
+}
+
+func (t *timeFlag) String() string {
+	if t == nil || t.Time == nil {
+		return ""
+	}
+	return t.Time.Format(time.RFC3339)
+}
+
+func (t *timeFlag) Set(value string) error {
+	time, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return err
+	}
+	t.Time = &time
+	return nil
+}
+
 var (
-	argFile = flag.String("f", "-", "path to query log file. Pass '-' to read from stdin")
+	now = time.Now()
+	argFile = flag.String("f", "-", "path to the query log file. Pass '-' to read from stdin")
+	argFrom timeFlag
+	argTo timeFlag
 )
+
+func init() {
+	flag.Var(&argFrom, "from", "load log entries afer this time. Accepts RFC3339 format, e.g. " + now.UTC().Format(time.RFC3339))
+	flag.Var(&argTo, "to", "load log entries until this time. Accepts RFC3339 format, e.g. " + now.UTC().Format(time.RFC3339))
+}
 
 type LogEntry struct {
 	Params struct {
@@ -115,7 +143,7 @@ type LoadStats struct {
 	To time.Time
 }
 
-func LoadQueriesFromLog(file *os.File) ([]*Query, LoadStats, error) {
+func LoadQueriesFromLog(file *os.File, from *time.Time, to *time.Time) ([]*Query, LoadStats, error) {
 	qMap := make(map[string][]LogEntry)
 	stats := LoadStats{0, time.Now(), time.Time{}}
 	scanner := bufio.NewScanner(file)
@@ -129,7 +157,15 @@ func LoadQueriesFromLog(file *os.File) ([]*Query, LoadStats, error) {
 			log.Printf("Failed to parse line %d: empty query", lineNum)
 			continue
 		}
+		if from != nil && entry.TS.Before(*from) {
+			continue
+		}
+		if to != nil && entry.TS.After(*to) {
+			continue
+		}
+
 		qMap[entry.Params.Query] = append(qMap[entry.Params.Query], entry)
+
 		stats.Num++
 		if entry.TS.Before(stats.From) {
 			stats.From = *entry.TS
@@ -171,7 +207,7 @@ func main() {
 		log.Print("Reading the query log from stdin")
 	}
 
-	queries, loadStats, err := LoadQueriesFromLog(input)
+	queries, loadStats, err := LoadQueriesFromLog(input, argFrom.Time, argTo.Time)
 	if err != nil {
 		log.Fatalf("Failed to parse the query log file: %s", err)
 	}
