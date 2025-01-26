@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"sort"
+	"time"
 )
 
 var (
@@ -17,8 +18,8 @@ var (
 type LogEntry struct {
 	Params struct {
 		Query string `json:"query"`
-		Start string `json:"start"`
-		End   string `json:"end"`
+		Start *time.Time `json:"start"`
+		End   *time.Time `json:"end"`
 		Step  int	 `json:"step"`
 	} `json:"params"`
 	Stats struct {
@@ -35,7 +36,11 @@ type LogEntry struct {
 			PeakSamples           int `json:"peakSamples"`
 		} `json:"samples,omitempty"`
 	} `json:"stats"`
-	TS string `json:"ts"`
+	RuleGroup *struct {
+		Name string `json:"name,omitempty"`
+		File string `json:"file,omitempty"`
+	} `json:"ruleGroup,omitempty"`
+	TS *time.Time `json:"ts"`
 }
 
 func avg[T int | float64](nums []T) float64 {
@@ -104,36 +109,50 @@ func (q ByAvgPeakSamples) Less(i, j int) bool {
 	return q.Queries[i].AvgPeakSamples < q.Queries[j].AvgPeakSamples
 }
 
-func loadQueriesFromLog(file *os.File) ([]*Query, error) {
+type LoadStats struct {
+	Num int
+	From time.Time
+	To time.Time
+}
+
+func LoadQueriesFromLog(file *os.File) ([]*Query, LoadStats, error) {
 	qMap := make(map[string][]LogEntry)
+	stats := LoadStats{0, time.Now(), time.Time{}}
 	scanner := bufio.NewScanner(file)
 	for lineNum := 0; scanner.Scan(); lineNum++ {
 		line := scanner.Bytes()
 		var entry LogEntry
 		if err := json.Unmarshal(line, &entry); err != nil {
-			return nil, fmt.Errorf("Failed to parse line %d: %w", lineNum, err)
+			return nil, stats, fmt.Errorf("Failed to parse line %d: %w", lineNum, err)
 		}
 		if entry.Params.Query == "" {
-			log.Printf("Failed to parse line %d: invalid query \"%s\"", lineNum, entry.Params.Query)
+			log.Printf("Failed to parse line %d: empty query", lineNum)
 			continue
 		}
 		qMap[entry.Params.Query] = append(qMap[entry.Params.Query], entry)
+		stats.Num++
+		if entry.TS.Before(stats.From) {
+			stats.From = *entry.TS
+		}
+		if entry.TS.After(stats.To) {
+			stats.To = *entry.TS
+		}
 	}
 
 	if err := scanner.Err(); err != nil {
-		return nil, err
+		return nil, stats, err
 	}
 
 	queries := make([]*Query, 0, len(qMap))
 	for query, logs := range qMap {
 		if q, err := NewQuery(query, logs); err != nil {
-			return nil, fmt.Errorf("Failed to create Query: %w", err)
+			return nil, stats, fmt.Errorf("Failed to create Query: %w", err)
 		} else {
 			queries = append(queries, q)
 		}
 	}
 
-	return queries, nil
+	return queries, stats, nil
 }
 
 func main() {
@@ -152,10 +171,14 @@ func main() {
 		log.Print("Reading the query log from stdin")
 	}
 
-	queries, err := loadQueriesFromLog(input)
+	queries, loadStats, err := LoadQueriesFromLog(input)
 	if err != nil {
 		log.Fatalf("Failed to parse the query log file: %s", err)
 	}
+	if len(queries) == 0 {
+		log.Fatalln("Loaded 0 queries")
+	}
+	log.Printf("Loaded %d entries from [%v] to [%v]", loadStats.Num, loadStats.From, loadStats.To)
 
 	top := 10
 	if top > len(queries) {
