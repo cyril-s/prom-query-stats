@@ -36,6 +36,7 @@ var (
 	argFile = flag.String("f", "-", "path to the query log file. Pass '-' to read from stdin")
 	argFrom timeFlag
 	argTo timeFlag
+	argTop = flag.Int("top", 10, "number of queries to display")
 )
 
 func init() {
@@ -216,14 +217,13 @@ func main() {
 	}
 	log.Printf("Loaded %d entries from [%v] to [%v]", loadStats.Num, loadStats.From, loadStats.To)
 
-	top := 10
-	if top > len(queries) {
-		top = len(queries)
+	if *argTop > len(queries) {
+		*argTop = len(queries)
 	}
 
 	sort.Sort(sort.Reverse(ByAvgExecTotalTime{queries}))
-	fmt.Printf("Top %d queries by average execution time:\n", top)
-	for i, query := range queries[:top] {
+	fmt.Printf("Top %d queries by average execution time:\n", *argTop)
+	for i, query := range queries[:*argTop] {
 		fmt.Printf(
 			"[%2d] n: %-6d %.3fs %s\n",
 			i+1,
@@ -235,8 +235,8 @@ func main() {
 
 	sort.Sort(sort.Reverse(ByAvgTotalQueryableSamples{queries}))
 	fmt.Println()
-	fmt.Printf("Top %d queries by average total queryable samples:\n", top)
-	for i, query := range queries[:top] {
+	fmt.Printf("Top %d queries by average total queryable samples:\n", *argTop)
+	for i, query := range queries[:*argTop] {
 		fmt.Printf(
 			"[%2d] n: %-6d %.3f %s\n",
 			i+1,
@@ -248,8 +248,8 @@ func main() {
 
 	sort.Sort(sort.Reverse(ByAvgPeakSamples{queries}))
 	fmt.Println()
-	fmt.Printf("Top %d queries by average peak samples:\n", top)
-	for i, query := range queries[:top] {
+	fmt.Printf("Top %d queries by average peak samples:\n", *argTop)
+	for i, query := range queries[:*argTop] {
 		fmt.Printf(
 			"[%2d] n: %-6d %.3f %s\n",
 			i+1,
