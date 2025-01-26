@@ -9,6 +9,7 @@ import (
 	"os"
 	"sort"
 	"time"
+	"regexp"
 )
 
 type timeFlag struct {
@@ -192,6 +193,11 @@ func LoadQueriesFromLog(file *os.File, from *time.Time, to *time.Time) ([]*Query
 	return queries, stats, nil
 }
 
+func removeNL(str string) string {
+	re := regexp.MustCompile(`\n\s*`)
+	return re.ReplaceAllString(str, "")
+}
+
 func main() {
 	flag.Parse()
 
@@ -221,41 +227,30 @@ func main() {
 		*argTop = len(queries)
 	}
 
-	sort.Sort(sort.Reverse(ByAvgExecTotalTime{queries}))
-	fmt.Printf("Top %d queries by average execution time:\n", *argTop)
-	for i, query := range queries[:*argTop] {
-		fmt.Printf(
-			"[%2d] n: %-6d %.3fs %s\n",
-			i+1,
-			len(query.Logs),
-			query.AvgExecTotalTime,
-			query.Query,
-		)
+	printTable := func (title, unit string, getter func(q *Query) float64) {
+		fmt.Printf("\nTop %d queries by %s:\n", *argTop, title)
+		for i, query := range queries[:*argTop] {
+			fmt.Printf(
+				"[%2d] n: %-6d %.3f%s %s",
+				i+1,
+				len(query.Logs),
+				getter(query),
+				unit,
+				removeNL(query.Query),
+			)
+			if query.Logs[0].RuleGroup != nil {
+				fmt.Printf(" | ruleName=\"%s\"", query.Logs[0].RuleGroup.Name)
+			}
+			fmt.Println()
+		}
 	}
+
+	sort.Sort(sort.Reverse(ByAvgExecTotalTime{queries}))
+	printTable("average execution time", "s", func(q *Query) float64 { return q.AvgExecTotalTime })
 
 	sort.Sort(sort.Reverse(ByAvgTotalQueryableSamples{queries}))
-	fmt.Println()
-	fmt.Printf("Top %d queries by average total queryable samples:\n", *argTop)
-	for i, query := range queries[:*argTop] {
-		fmt.Printf(
-			"[%2d] n: %-6d %.3f %s\n",
-			i+1,
-			len(query.Logs),
-			query.AvgTotalQueryableSamples,
-			query.Query,
-		)
-	}
+	printTable("average total queryable samples", "", func(q *Query) float64 { return q.AvgTotalQueryableSamples })
 
 	sort.Sort(sort.Reverse(ByAvgPeakSamples{queries}))
-	fmt.Println()
-	fmt.Printf("Top %d queries by average peak samples:\n", *argTop)
-	for i, query := range queries[:*argTop] {
-		fmt.Printf(
-			"[%2d] n: %-6d %.3f %s\n",
-			i+1,
-			len(query.Logs),
-			query.AvgPeakSamples,
-			query.Query,
-		)
-	}
+	printTable("average peak samples", "", func(q *Query) float64 { return q.AvgPeakSamples })
 }
