@@ -7,9 +7,10 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"regexp"
+	"runtime/debug"
 	"sort"
 	"time"
-	"regexp"
 )
 
 type timeFlag struct {
@@ -38,6 +39,7 @@ var (
 	argFrom timeFlag
 	argTo timeFlag
 	argTop = flag.Int("top", 10, "number of queries to display")
+	argVer = flag.Bool("version", false, "show version")
 )
 
 func init() {
@@ -200,6 +202,17 @@ func removeNL(str string) string {
 
 func main() {
 	flag.Parse()
+
+	if *argVer {
+		if buildInfo, ok := debug.ReadBuildInfo(); ok {
+			fmt.Println(buildInfo.Main.Version)
+			fmt.Println(buildInfo)
+			os.Exit(0)
+		} else {
+			fmt.Println("Failed to get build info")
+			os.Exit(13)
+		}
+	}
 
 	input := os.Stdin
 	if *argFile != "-" {
