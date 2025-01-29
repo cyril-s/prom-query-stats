@@ -89,6 +89,9 @@ type Query struct {
 	AvgExecTotalTime float64
 	AvgTotalQueryableSamples float64
 	AvgPeakSamples float64
+	MaxExecTotalTimeEntry *LogEntry
+	MaxTotalQueryableSamplesEntry *LogEntry
+	MaxPeakSamplesEntry *LogEntry
 }
 
 func NewQuery(query string, logs []LogEntry) (*Query, error) {
@@ -99,6 +102,9 @@ func NewQuery(query string, logs []LogEntry) (*Query, error) {
 		return nil, fmt.Errorf("a number of log entries must be greater than zero")
 	}
 
+	maxExecTotalTimeEntry := &logs[0]
+	maxTotalQueryableSamplesEntry := &logs[0]
+	maxPeakSamplesEntry := &logs[0]
 	execTotalTimeVals := make([]float64, 0, len(logs))
 	totalQueryableSamplesVals := make([]int, 0, len(logs))
 	peakSamplesVals := make([]int, 0, len(logs))
@@ -106,6 +112,15 @@ func NewQuery(query string, logs []LogEntry) (*Query, error) {
 		execTotalTimeVals = append(execTotalTimeVals, log.Stats.Timings.ExecTotalTime)
 		totalQueryableSamplesVals = append(totalQueryableSamplesVals, log.Stats.Samples.TotalQueryableSamples)
 		peakSamplesVals = append(peakSamplesVals, log.Stats.Samples.PeakSamples)
+		if log.Stats.Timings.ExecTotalTime > maxExecTotalTimeEntry.Stats.Timings.ExecTotalTime {
+			maxExecTotalTimeEntry = &log
+		}
+		if log.Stats.Samples.TotalQueryableSamples > maxTotalQueryableSamplesEntry.Stats.Samples.TotalQueryableSamples {
+			maxTotalQueryableSamplesEntry = &log
+		}
+		if log.Stats.Samples.PeakSamples > maxPeakSamplesEntry.Stats.Samples.PeakSamples {
+			maxPeakSamplesEntry = &log
+		}
 	}
 
 	q := Query{
@@ -114,7 +129,11 @@ func NewQuery(query string, logs []LogEntry) (*Query, error) {
 		avg(execTotalTimeVals),
 		avg(totalQueryableSamplesVals),
 		avg(peakSamplesVals),
+		maxExecTotalTimeEntry,
+		maxTotalQueryableSamplesEntry,
+		maxPeakSamplesEntry,
 	}
+
 	return &q, nil
 }
 
@@ -129,16 +148,34 @@ func (q ByAvgExecTotalTime) Less(i, j int) bool {
 	return q.Queries[i].AvgExecTotalTime < q.Queries[j].AvgExecTotalTime
 }
 
+type ByMaxExecTotalTime struct {Queries}
+
+func (q ByMaxExecTotalTime) Less(i, j int) bool {
+	return q.Queries[i].MaxExecTotalTimeEntry.Stats.Timings.ExecTotalTime < q.Queries[j].MaxExecTotalTimeEntry.Stats.Timings.ExecTotalTime
+}
+
 type ByAvgTotalQueryableSamples struct {Queries}
 
 func (q ByAvgTotalQueryableSamples) Less(i, j int) bool {
 	return q.Queries[i].AvgTotalQueryableSamples < q.Queries[j].AvgTotalQueryableSamples
 }
 
+type ByMaxTotalQueryableSamples struct {Queries}
+
+func (q ByMaxTotalQueryableSamples) Less(i, j int) bool {
+	return q.Queries[i].MaxTotalQueryableSamplesEntry.Stats.Samples.TotalQueryableSamples < q.Queries[j].MaxTotalQueryableSamplesEntry.Stats.Samples.TotalQueryableSamples
+}
+
 type ByAvgPeakSamples struct {Queries}
 
 func (q ByAvgPeakSamples) Less(i, j int) bool {
 	return q.Queries[i].AvgPeakSamples < q.Queries[j].AvgPeakSamples
+}
+
+type ByMaxPeakSamples struct {Queries}
+
+func (q ByMaxPeakSamples) Less(i, j int) bool {
+	return q.Queries[i].MaxPeakSamplesEntry.Stats.Samples.PeakSamples < q.Queries[j].MaxPeakSamplesEntry.Stats.Samples.PeakSamples
 }
 
 type LoadStats struct {
@@ -240,11 +277,11 @@ func main() {
 		*argTop = len(queries)
 	}
 
-	printTable := func (title, unit string, getter func(q *Query) float64) {
+	printAvgTable := func (title, unit string, getter func(q *Query) float64) {
 		fmt.Printf("\nTop %d queries by %s:\n", *argTop, title)
 		for i, query := range queries[:*argTop] {
 			fmt.Printf(
-				"[%2d] n: %-6d %.3f%s %s",
+				"%2d) n=%-6d %.3f%s %s",
 				i+1,
 				len(query.Logs),
 				getter(query),
@@ -258,12 +295,48 @@ func main() {
 		}
 	}
 
+	printMaxTable := func (title, unit string, valueGetter func(q *Query) interface{}, tsGetter func(q *Query) *time.Time) {
+		fmt.Printf("\nTop %d queries by %s:\n", *argTop, title)
+		for i, query := range queries[:*argTop] {
+			valueOut := ""
+			switch value := valueGetter(query).(type) {
+			case int:
+				valueOut = fmt.Sprintf("%d", value)
+			case float64:
+				valueOut = fmt.Sprintf("%.3f", value)
+			default:
+				panic("unsupported type")
+			}
+			fmt.Printf(
+				"%2d) t=%s %s%s %s",
+				i+1,
+				tsGetter(query).Format(time.RFC3339),
+				valueOut,
+				unit,
+				removeNL(query.Query),
+			)
+			if query.Logs[0].RuleGroup != nil {
+				fmt.Printf(" | ruleName=\"%s\"", query.Logs[0].RuleGroup.Name)
+			}
+			fmt.Println()
+		}
+	}
+
 	sort.Sort(sort.Reverse(ByAvgExecTotalTime{queries}))
-	printTable("average execution time", "s", func(q *Query) float64 { return q.AvgExecTotalTime })
+	printAvgTable("average execution time", "s", func(q *Query) float64 { return q.AvgExecTotalTime })
+
+	sort.Sort(sort.Reverse(ByMaxExecTotalTime{queries}))
+	printMaxTable("max execution time", "s", func(q *Query) interface{} { return q.MaxExecTotalTimeEntry.Stats.Timings.ExecTotalTime }, func(q *Query) *time.Time { return q.MaxExecTotalTimeEntry.TS })
 
 	sort.Sort(sort.Reverse(ByAvgTotalQueryableSamples{queries}))
-	printTable("average total queryable samples", "", func(q *Query) float64 { return q.AvgTotalQueryableSamples })
+	printAvgTable("average total queryable samples", "", func(q *Query) float64 { return q.AvgTotalQueryableSamples })
+
+	sort.Sort(sort.Reverse(ByMaxTotalQueryableSamples{queries}))
+	printMaxTable("max total queryable samples", "", func(q *Query) interface{} { return q.MaxTotalQueryableSamplesEntry.Stats.Samples.TotalQueryableSamples }, func(q *Query) *time.Time { return q.MaxTotalQueryableSamplesEntry.TS })
 
 	sort.Sort(sort.Reverse(ByAvgPeakSamples{queries}))
-	printTable("average peak samples", "", func(q *Query) float64 { return q.AvgPeakSamples })
+	printAvgTable("average peak samples", "", func(q *Query) float64 { return q.AvgPeakSamples })
+
+	sort.Sort(sort.Reverse(ByMaxPeakSamples{queries}))
+	printMaxTable("max peak samples", "", func(q *Query) interface{} { return q.MaxPeakSamplesEntry.Stats.Samples.PeakSamples }, func(q *Query) *time.Time { return q.MaxPeakSamplesEntry.TS })
 }
