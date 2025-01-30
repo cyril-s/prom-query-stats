@@ -11,6 +11,8 @@ import (
 	"runtime/debug"
 	"sort"
 	"time"
+	"slices"
+	"math"
 )
 
 type timeFlag struct {
@@ -38,8 +40,9 @@ var (
 	argFile = flag.String("f", "-", "path to the query log file. Pass '-' to read from stdin")
 	argFrom timeFlag
 	argTo timeFlag
-	argTop = flag.Int("top", 10, "number of queries to display")
+	argTop = flag.Int("top", 10, "number of top queries to display")
 	argVer = flag.Bool("version", false, "show version")
+	argPerc = flag.Int("p", 95, "percentile rank")
 )
 
 func init() {
@@ -75,6 +78,41 @@ type LogEntry struct {
 	TS *time.Time `json:"ts"`
 }
 
+type LogEntries []*LogEntry
+
+func (le LogEntries) Len() int { return len(le) }
+func (le LogEntries) Swap(i, j int) { le[i], le[j] = le[j], le[i] }
+
+type ByTime struct {LogEntries}
+
+func (le ByTime) Less(i, j int) bool {
+	return le.LogEntries[i].TS.Before(*le.LogEntries[j].TS)
+}
+
+func (le LogEntries) GetExecTotalTimeValues() []float64 {
+	vals := make([]float64, 0, len(le))
+	for _, log := range le {
+		vals = append(vals, log.Stats.Timings.ExecTotalTime)
+	}
+	return vals
+}
+
+func (le LogEntries) GetTotalQueryableSamplesValues() []int {
+	vals := make([]int, 0, len(le))
+	for _, log := range le {
+		vals = append(vals, log.Stats.Samples.TotalQueryableSamples)
+	}
+	return vals
+}
+
+func (le LogEntries) GetPeakSamplesValues() []int {
+	vals := make([]int, 0, len(le))
+	for _, log := range le {
+		vals = append(vals, log.Stats.Samples.PeakSamples)
+	}
+	return vals
+}
+
 func avg[T int | float64](nums []T) float64 {
 	var sum T
 	for _, num := range nums {
@@ -83,9 +121,23 @@ func avg[T int | float64](nums []T) float64 {
 	return float64(sum) / float64(len(nums))
 }
 
+func percentile[T int | float64](p int, nums []T) (T, error) {
+	if p <= 0 || p > 100 {
+		return 0, fmt.Errorf("percentile %d is out of range", p)
+	}
+	if len(nums) == 0 {
+		return 0, fmt.Errorf("the slice is empty")
+	}
+
+	slices.Sort(nums)
+	var k float64 = (float64(p)/100.0) * float64(len(nums))
+	var kth int = int(math.Ceil(k))
+	return nums[kth], nil
+}
+
 type Query struct {
 	Query string
-	Logs []LogEntry
+	Logs []*LogEntry
 	AvgExecTotalTime float64
 	AvgTotalQueryableSamples float64
 	AvgPeakSamples float64
@@ -94,7 +146,7 @@ type Query struct {
 	MaxPeakSamplesEntry *LogEntry
 }
 
-func NewQuery(query string, logs []LogEntry) (*Query, error) {
+func NewQuery(query string, logs []*LogEntry) (*Query, error) {
 	if query == "" {
 		return nil, fmt.Errorf("a query cannot be empty")
 	}
@@ -102,9 +154,9 @@ func NewQuery(query string, logs []LogEntry) (*Query, error) {
 		return nil, fmt.Errorf("a number of log entries must be greater than zero")
 	}
 
-	maxExecTotalTimeEntry := &logs[0]
-	maxTotalQueryableSamplesEntry := &logs[0]
-	maxPeakSamplesEntry := &logs[0]
+	maxExecTotalTimeEntry := logs[0]
+	maxTotalQueryableSamplesEntry := logs[0]
+	maxPeakSamplesEntry := logs[0]
 	execTotalTimeVals := make([]float64, 0, len(logs))
 	totalQueryableSamplesVals := make([]int, 0, len(logs))
 	peakSamplesVals := make([]int, 0, len(logs))
@@ -113,13 +165,13 @@ func NewQuery(query string, logs []LogEntry) (*Query, error) {
 		totalQueryableSamplesVals = append(totalQueryableSamplesVals, log.Stats.Samples.TotalQueryableSamples)
 		peakSamplesVals = append(peakSamplesVals, log.Stats.Samples.PeakSamples)
 		if log.Stats.Timings.ExecTotalTime > maxExecTotalTimeEntry.Stats.Timings.ExecTotalTime {
-			maxExecTotalTimeEntry = &log
+			maxExecTotalTimeEntry = log
 		}
 		if log.Stats.Samples.TotalQueryableSamples > maxTotalQueryableSamplesEntry.Stats.Samples.TotalQueryableSamples {
-			maxTotalQueryableSamplesEntry = &log
+			maxTotalQueryableSamplesEntry = log
 		}
 		if log.Stats.Samples.PeakSamples > maxPeakSamplesEntry.Stats.Samples.PeakSamples {
-			maxPeakSamplesEntry = &log
+			maxPeakSamplesEntry = log
 		}
 	}
 
@@ -178,21 +230,15 @@ func (q ByMaxPeakSamples) Less(i, j int) bool {
 	return q.Queries[i].MaxPeakSamplesEntry.Stats.Samples.PeakSamples < q.Queries[j].MaxPeakSamplesEntry.Stats.Samples.PeakSamples
 }
 
-type LoadStats struct {
-	Num int
-	From time.Time
-	To time.Time
-}
-
-func LoadQueriesFromLog(file *os.File, from *time.Time, to *time.Time) ([]*Query, LoadStats, error) {
-	qMap := make(map[string][]LogEntry)
-	stats := LoadStats{0, time.Now(), time.Time{}}
+func LoadQueriesFromLog(file *os.File, from *time.Time, to *time.Time) ([]*Query, LogEntries, error) {
+	qMap := make(map[string][]*LogEntry)
+	logs := make([]*LogEntry, 0)
 	scanner := bufio.NewScanner(file)
 	for lineNum := 0; scanner.Scan(); lineNum++ {
 		line := scanner.Bytes()
 		var entry LogEntry
 		if err := json.Unmarshal(line, &entry); err != nil {
-			return nil, stats, fmt.Errorf("Failed to parse line %d: %w", lineNum, err)
+			return nil, nil, fmt.Errorf("Failed to parse line %d: %w", lineNum, err)
 		}
 		if entry.Params.Query == "" {
 			log.Printf("Failed to parse line %d: empty query", lineNum)
@@ -205,31 +251,24 @@ func LoadQueriesFromLog(file *os.File, from *time.Time, to *time.Time) ([]*Query
 			continue
 		}
 
-		qMap[entry.Params.Query] = append(qMap[entry.Params.Query], entry)
-
-		stats.Num++
-		if entry.TS.Before(stats.From) {
-			stats.From = *entry.TS
-		}
-		if entry.TS.After(stats.To) {
-			stats.To = *entry.TS
-		}
+		qMap[entry.Params.Query] = append(qMap[entry.Params.Query], &entry)
+		logs = append(logs, &entry)
 	}
 
 	if err := scanner.Err(); err != nil {
-		return nil, stats, err
+		return nil, nil, err
 	}
 
 	queries := make([]*Query, 0, len(qMap))
-	for query, logs := range qMap {
-		if q, err := NewQuery(query, logs); err != nil {
-			return nil, stats, fmt.Errorf("Failed to create Query: %w", err)
+	for query, queryLogs := range qMap {
+		if q, err := NewQuery(query, queryLogs); err != nil {
+			return nil, nil, fmt.Errorf("Failed to create Query: %w", err)
 		} else {
 			queries = append(queries, q)
 		}
 	}
 
-	return queries, stats, nil
+	return queries, logs, nil
 }
 
 func removeNL(str string) string {
@@ -251,6 +290,11 @@ func main() {
 		}
 	}
 
+	if *argPerc <= 0 || *argPerc > 100 {
+		fmt.Println("The percentile rank does not make sense. Must be between 0 and 100")
+		os.Exit(1)
+	}
+
 	input := os.Stdin
 	if *argFile != "-" {
 		log.Printf("Reading the query log from %s", *argFile)
@@ -264,21 +308,23 @@ func main() {
 		log.Print("Reading the query log from stdin")
 	}
 
-	queries, loadStats, err := LoadQueriesFromLog(input, argFrom.Time, argTo.Time)
+	queries, logs, err := LoadQueriesFromLog(input, argFrom.Time, argTo.Time)
 	if err != nil {
 		log.Fatalf("Failed to parse the query log file: %s", err)
 	}
 	if len(queries) == 0 {
 		log.Fatalln("Loaded 0 queries")
 	}
-	log.Printf("Loaded %d entries from [%v] to [%v]", loadStats.Num, loadStats.From, loadStats.To)
+
+	sort.Sort(ByTime{logs})
+	log.Printf("Loaded %d entries from [%v] to [%v]", len(logs), logs[0].TS, logs[len(logs)-1].TS)
 
 	if *argTop > len(queries) {
 		*argTop = len(queries)
 	}
 
 	printAvgTable := func (title, unit string, getter func(q *Query) float64) {
-		fmt.Printf("\nTop %d queries by %s:\n", *argTop, title)
+		fmt.Printf("Top %d queries by %s:\n", *argTop, title)
 		for i, query := range queries[:*argTop] {
 			fmt.Printf(
 				"%2d) n=%-6d %.3f%s %s",
@@ -296,7 +342,7 @@ func main() {
 	}
 
 	printMaxTable := func (title, unit string, valueGetter func(q *Query) interface{}, tsGetter func(q *Query) *time.Time) {
-		fmt.Printf("\nTop %d queries by %s:\n", *argTop, title)
+		fmt.Printf("Top %d queries by %s:\n", *argTop, title)
 		for i, query := range queries[:*argTop] {
 			valueOut := ""
 			switch value := valueGetter(query).(type) {
@@ -322,21 +368,48 @@ func main() {
 		}
 	}
 
+	if p, err := percentile(*argPerc, logs.GetExecTotalTimeValues()); err != nil {
+		log.Fatalf("Failed to calculate percentile: %s", err)
+	} else {
+		fmt.Println()
+		fmt.Printf("The %dth percentile of total execution time is %.3f seconds\n", *argPerc, p)
+	}
+
 	sort.Sort(sort.Reverse(ByAvgExecTotalTime{queries}))
+	fmt.Println()
 	printAvgTable("average execution time", "s", func(q *Query) float64 { return q.AvgExecTotalTime })
 
 	sort.Sort(sort.Reverse(ByMaxExecTotalTime{queries}))
+	fmt.Println()
 	printMaxTable("max execution time", "s", func(q *Query) interface{} { return q.MaxExecTotalTimeEntry.Stats.Timings.ExecTotalTime }, func(q *Query) *time.Time { return q.MaxExecTotalTimeEntry.TS })
 
+	if p, err := percentile(*argPerc, logs.GetTotalQueryableSamplesValues()); err != nil {
+		log.Fatalf("Failed to calculate percentile: %s", err)
+	} else {
+		fmt.Println()
+		fmt.Printf("The %dth percentile of total queryable samples is %d\n", *argPerc, p)
+	}
+
 	sort.Sort(sort.Reverse(ByAvgTotalQueryableSamples{queries}))
+	fmt.Println()
 	printAvgTable("average total queryable samples", "", func(q *Query) float64 { return q.AvgTotalQueryableSamples })
 
 	sort.Sort(sort.Reverse(ByMaxTotalQueryableSamples{queries}))
+	fmt.Println()
 	printMaxTable("max total queryable samples", "", func(q *Query) interface{} { return q.MaxTotalQueryableSamplesEntry.Stats.Samples.TotalQueryableSamples }, func(q *Query) *time.Time { return q.MaxTotalQueryableSamplesEntry.TS })
 
+	if p, err := percentile(*argPerc, logs.GetPeakSamplesValues()); err != nil {
+		log.Fatalf("Failed to calculate percentile: %s", err)
+	} else {
+		fmt.Println()
+		fmt.Printf("The %dth percentile of peak samples is %d\n", *argPerc, p)
+	}
+
 	sort.Sort(sort.Reverse(ByAvgPeakSamples{queries}))
+	fmt.Println()
 	printAvgTable("average peak samples", "", func(q *Query) float64 { return q.AvgPeakSamples })
 
 	sort.Sort(sort.Reverse(ByMaxPeakSamples{queries}))
+	fmt.Println()
 	printMaxTable("max peak samples", "", func(q *Query) interface{} { return q.MaxPeakSamplesEntry.Stats.Samples.PeakSamples }, func(q *Query) *time.Time { return q.MaxPeakSamplesEntry.TS })
 }
